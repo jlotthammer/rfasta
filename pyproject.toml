@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "pfasta_rs"
+name = "rfasta"
 requires-python = ">=3.7"
 classifiers = [
     "Programming Language :: Rust",
@@ -12,9 +12,12 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.scripts]
+rfasta = "rfasta:cli_main"
+
 [tool.maturin]
 features = ["python", "cli"]  # Enable both features
-module-name = "pfasta_rs"
+module-name = "rfasta"
 bindings = "pyo3"
 # This tells maturin to include the binary
-bin = ["pfasta"]
+bin = ["rfasta"]

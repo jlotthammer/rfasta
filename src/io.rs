@@ -1,9 +1,28 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::fs;
-use pyo3::PyErr;
-use pyo3::prelude::*;
 
+/// Checks the validity of input parameters.
+///
+/// This function validates the provided input parameters to ensure they meet the expected requirements.
+///
+/// # Arguments
+///
+/// * `expect_unique_header` - A boolean indicating whether headers are expected to be unique.
+/// * `header_parser` - An optional function to parse headers.
+/// * `check_header_parser` - A boolean to check the header parser function.
+/// * `duplicate_record_action` - Action to take on duplicate records ("ignore", "fail", "remove").
+/// * `duplicate_sequence_action` - Action to take on duplicate sequences ("ignore", "fail", "remove").
+/// * `invalid_sequence_action` - Action to take on invalid sequences.
+/// * `alignment` - A boolean indicating if sequences should be aligned.
+/// * `return_list` - A boolean indicating if results should be returned as a list.
+/// * `output_filename` - An optional output filename.
+/// * `verbose` - A boolean for verbose output.
+/// * `correction_dictionary` - An optional dictionary for sequence corrections.
+///
+/// # Returns
+///
+/// * `Ok(())` if all inputs are valid, or an `Err(String)` with an error message.
 pub fn check_inputs(
     expect_unique_header: bool,
     header_parser: Option<Box<dyn Fn(String) -> Result<String, String>>>,
@@ -90,17 +109,29 @@ pub fn check_inputs(
     Ok(())
 }
 
+/// Parses a FASTA file and returns the data as a vector of sequences.
+///
+/// This function reads a FASTA file and parses its content into a vector of [header, sequence] pairs.
+///
+/// # Arguments
+///
+/// * `filename` - The path to the FASTA file.
+/// * `expect_unique_header` - Whether to expect unique headers in the FASTA file.
+/// * `header_parser` - An optional function to parse header lines.
+/// * `verbose` - Whether to enable verbose output.
+///
+/// # Returns
+///
+/// * `Result<Vec<Vec<String>>, String>` - A vector where each element is a vector containing the header and sequence, or an error message.
 pub fn internal_parse_fasta_file(
     filename: &str,
     expect_unique_header: bool,
     header_parser: Option<Box<dyn Fn(String) -> String>>,
     verbose: bool,
-) -> Vec<Vec<String>> {
+) -> Result<Vec<Vec<String>>, String> {
     // Read in the file...
-    let content = match fs::read_to_string(filename) {
-        Ok(content) => content,
-        Err(_) => panic!("Unable to find file: {}", filename),
-    };
+    let content = fs::read_to_string(filename)
+        .map_err(|_| format!("Unable to find or read file: {}", filename))?;
 
     let lines: Vec<String> = content.lines().map(|s: &str| s.to_string()).collect();
 
@@ -109,7 +140,7 @@ pub fn internal_parse_fasta_file(
     }
 
     // Call _parse_fasta_all to parse the content
-    _parse_fasta_all(lines, expect_unique_header, header_parser, verbose)
+    Ok(_parse_fasta_all(lines, expect_unique_header, header_parser, verbose))
 }
 
 fn _parse_fasta_all(
@@ -170,25 +201,34 @@ fn _parse_fasta_all(
     return_data
 }
 
-#[pyfunction]
-#[pyo3(signature = (fasta_data, filename, line_length = None, verbose = true, append_to_fasta = false))]
+/// Writes FASTA data to a file.
+///
+/// This function takes FASTA data and writes it to a specified file in FASTA format.
+///
+/// # Arguments
+///
+/// * `fasta_data` - A vector of [header, sequence] pairs to write.
+/// * `filename` - The output file path.
+/// * `line_length` - An optional line length for wrapping sequences.
+/// * `verbose` - Whether to enable verbose output.
+/// * `append_to_fasta` - Whether to append to the file instead of overwriting.
+///
+/// # Returns
+///
+/// * `Ok(())` if writing is successful, or an `Err(String)` with an error message.
 pub fn write_fasta(
     fasta_data: Vec<Vec<String>>,
     filename: &str,
     line_length: Option<usize>,
     verbose: bool,
     append_to_fasta: bool,
-) -> PyResult<()> {
-    // Validate line length
+) -> Result<(), String> {
     let line_length = match line_length {
         Some(len) if len >= 5 => Some(len),
         Some(_) => Some(5),
         None => None,
     };
-
-    let data_len = fasta_data.len();  // Store length before processing
-    
-    // Open file with appropriate mode
+    let data_len = fasta_data.len();
     use std::fs::OpenOptions;
     let mut file = OpenOptions::new()
         .write(true)
@@ -196,52 +236,70 @@ pub fn write_fasta(
         .append(append_to_fasta)
         .truncate(!append_to_fasta)
         .open(filename)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-    for entry in &fasta_data {  // Use reference to avoid moving fasta_data
+        .map_err(|e| e.to_string())?;
+    for entry in &fasta_data {
         if entry.len() != 2 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Each entry must contain exactly two elements: header and sequence",
-            ));
+            return Err("Each entry must contain exactly two elements: header and sequence".to_string());
         }
-
         let (header, seq) = (&entry[0], &entry[1]);
-        
         if seq.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Sequence associated with [{}] is empty", header)
-            ));
+            return Err(format!("Sequence associated with [{}] is empty", header));
         }
-
-        // Write header
-        writeln!(file, ">{}", header)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-        // Write sequence with line breaks
+        writeln!(file, ">{}", header).map_err(|e| e.to_string())?;
         match line_length {
             Some(len) => {
                 for chunk in seq.as_bytes().chunks(len) {
-                    file.write_all(chunk)
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-                    file.write_all(b"\n")
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+                    file.write_all(chunk).map_err(|e| e.to_string())?;
+                    file.write_all(b"\n").map_err(|e| e.to_string())?;
                 }
             }
             None => {
-                writeln!(file, "{}", seq)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+                writeln!(file, "{}", seq).map_err(|e| e.to_string())?;
             }
         }
-
-        // Add extra newline between sequences
-        file.write_all(b"\n")
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        file.write_all(b"\n").map_err(|e| e.to_string())?;
     }
-
     if verbose {
         println!("[INFO]: Wrote {} sequences to {}", data_len, filename);
     }
-
     Ok(())
 }
 
+/// Splits FASTA data into approximately equal chunks.
+///
+/// This function splits a vector of FASTA sequences into `n` chunks, ensuring that header and sequence pairs are kept together.
+///
+/// # Arguments
+///
+/// * `fasta_data` - A vector of [header, sequence] pairs.
+/// * `n` - The number of chunks to split the data into.
+///
+/// # Returns
+///
+/// * `Vec<Vec<Vec<String>>>` - A vector of chunks, where each chunk is a vector of [header, sequence] pairs.
+pub fn split_fasta(
+    fasta_data: Vec<Vec<String>>,
+    n: usize,
+) -> Vec<Vec<Vec<String>>> {
+    let total_sequences = fasta_data.len();
+    let chunk_size = (total_sequences + n - 1) / n; // Ceiling division to ensure all sequences are included
+    let mut chunks: Vec<Vec<Vec<String>>> = Vec::new();
+    let mut current_chunk: Vec<Vec<String>> = Vec::new();
+    let mut current_size = 0;
+
+    for entry in fasta_data {
+        if current_size >= chunk_size && chunks.len() < n - 1 {
+            chunks.push(current_chunk);
+            current_chunk = Vec::new();
+            current_size = 0;
+        }
+        current_chunk.push(entry);
+        current_size += 1;
+    }
+
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk);
+    }
+
+    chunks
+}

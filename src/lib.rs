@@ -1,43 +1,60 @@
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 // Import modules
 pub mod utilities;
 pub mod configs;
 pub mod io;
+pub mod cli;
+pub mod sequence_processing;
+
+#[cfg(feature = "python")]
+pub mod python;
 
 // Re-export everything that should be available to Rust users
 pub use configs::*;
 pub use utilities::*;
 pub use io::*;
+pub use cli::*;
 
-// Python module configuration
-// #[cfg(feature = "python")]
-#[pymodule]
-fn pfasta_rs(_py: Python, m: &PyModule) -> PyResult<()> {
-    // Bind functions from the `utilities` module
-    m.add_function(wrap_pyfunction!(utilities::build_custom_dictionary, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::convert_to_valid, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::check_sequence_is_valid, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::convert_invalid_sequences, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::remove_invalid_sequences, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::fail_on_invalid_sequences, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::convert_list_to_dictionary, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::fail_on_duplicates, m)?)?;
-    m.add_function(wrap_pyfunction!(utilities::remove_duplicates, m)?)?;
-    
-    // Bind functions from the `io` module (if required for Python)
-    m.add_function(wrap_pyfunction!(read_fasta, m)?)?;
+#[cfg(feature = "python")]
+#[pyfunction]
+/// Runs the rfasta CLI with the given arguments.
+///
+/// This function acts as a wrapper around the `cli::main` function. It imports the arguments from
+/// the Python `sys.argv` and passes them to the CLI main function.
+///
+/// # Arguments
+///
+/// * `py` - The Python interpreter.
+///
+/// # Returns
+///
+/// * `PyResult<()>` - Returns `Ok(())` if successful, or a `PyRuntimeError` if an error occurs.
+fn cli_main(py: Python) -> PyResult<()> {
+    let sys = py.import("sys")?;
+    let args: Vec<String> = sys.getattr("argv")?.extract()?;
 
-    Ok(())
+    crate::cli::main(&args).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
 }
 
-// Function to parse FASTA, bridging Rust and Python
-// #[cfg(feature = "python")]
-#[pyfunction]
-fn read_fasta(
-    filename: String,
-    expect_unique_header: bool,
-    verbose: bool,
-) -> PyResult<Vec<Vec<String>>> {
-    Ok(io::internal_parse_fasta_file(&filename, expect_unique_header, None, verbose))
+#[cfg(feature = "python")]
+#[pymodule]
+/// The `rfasta` Python module.
+///
+/// This module provides Python bindings for the rfasta library, allowing access to Rust functions
+/// from Python code.
+fn rfasta(_py: Python, m: &PyModule) -> PyResult<()> {
+    python::utilities::register(_py, m)?;
+    python::io::register(_py, m)?;
+    
+    // Update CLI function to use new module path
+    #[pyfn(m)]
+    fn run_cli(args: Vec<String>) -> PyResult<()> {
+        crate::cli::main(&args).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        Ok(())
+    }
+    
+    m.add_function(wrap_pyfunction!(cli_main, m)?)?;
+    Ok(())
 }

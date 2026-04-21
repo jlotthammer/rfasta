@@ -1,0 +1,31 @@
+site_name: rfasta
+site_description: Guide-first documentation for the rfasta Rust, Python, and CLI interfaces.
+site_url: https://rfasta.readthedocs.io/en/latest/
+repo_url: https://github.com/jlotthammer/rfasta
+repo_name: jlotthammer/rfasta
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Rust: rust.md
+  - Python: python.md
+  - CLI: cli.md
+  - Large FASTA: large-fasta.md
+  - API Reference: api-reference.md

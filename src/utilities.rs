@@ -1,204 +1,253 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::vec::Vec;
+use std::collections::{HashMap, HashSet};
 
-use crate::configs::{get_standard_aas, get_standard_aas_with_gap, get_standard_conversion, get_standard_conversion_with_gap};
+use crate::configs::{is_valid_residue, standard_conversion_map, standard_replacement};
+use crate::errors::RfastaError;
+use crate::io::FastaRecord;
 
-pub fn build_custom_dictionary(additional_dictionary: HashMap<String, String>) -> HashMap<String, String> {
-    let mut final_dict: HashMap<String, String> = get_standard_conversion()
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+/// Python-compatible correction dictionary type.
+pub type CorrectionDictionary = HashMap<String, String>;
+
+enum ConversionStrategy {
+    Standard { alignment: bool },
+    SingleChar(HashMap<char, String>),
+    MultiPattern(Vec<(String, String)>),
+}
+
+impl ConversionStrategy {
+    fn apply(&self, seq: &str) -> String {
+        match self {
+            Self::Standard { alignment } => {
+                let mut converted = String::with_capacity(seq.len());
+                for residue in seq.chars() {
+                    if let Some(replacement) = standard_replacement(residue, *alignment) {
+                        converted.push_str(replacement);
+                    } else {
+                        converted.push(residue.to_ascii_uppercase());
+                    }
+                }
+                converted
+            }
+            Self::SingleChar(map) => {
+                let mut converted = String::with_capacity(seq.len());
+                for residue in seq.chars() {
+                    let residue = residue.to_ascii_uppercase();
+                    if let Some(replacement) = map.get(&residue) {
+                        converted.push_str(replacement);
+                    } else {
+                        converted.push(residue);
+                    }
+                }
+                converted
+            }
+            Self::MultiPattern(patterns) => {
+                let mut converted = seq.to_ascii_uppercase();
+                for (from, to) in patterns {
+                    converted = converted.replace(from, to);
+                }
+                converted
+            }
+        }
+    }
+}
+
+fn conversion_strategy(
+    correction_dictionary: Option<CorrectionDictionary>,
+    alignment: bool,
+) -> ConversionStrategy {
+    match correction_dictionary {
+        Some(dictionary) => {
+            if dictionary.keys().all(|key| key.chars().count() == 1) {
+                let mut map = HashMap::with_capacity(dictionary.len());
+                for (key, value) in dictionary {
+                    let residue = key
+                        .chars()
+                        .next()
+                        .expect("single-character dictionary keys are non-empty")
+                        .to_ascii_uppercase();
+                    map.insert(residue, value.to_ascii_uppercase());
+                }
+                ConversionStrategy::SingleChar(map)
+            } else {
+                ConversionStrategy::MultiPattern(
+                    dictionary
+                        .into_iter()
+                        .map(|(from, to)| (from.to_ascii_uppercase(), to.to_ascii_uppercase()))
+                        .collect(),
+                )
+            }
+        }
+        None => ConversionStrategy::Standard { alignment },
+    }
+}
+
+/// Builds a correction dictionary by overlaying custom entries on the standard non-alignment map.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn build_custom_dictionary(
+    additional_dictionary: CorrectionDictionary,
+) -> CorrectionDictionary {
+    let mut final_dict = standard_conversion_map(false);
     for (key, value) in additional_dictionary {
         final_dict.insert(key, value);
     }
     final_dict
 }
 
-pub fn convert_to_valid(seq: &str, alignment: bool, correction_dictionary: Option<HashMap<String, String>>) -> String {
-    let converter: HashMap<String, String> = match correction_dictionary {
-        Some(dict) => dict,
-        None => {
-            if alignment {
-                get_standard_conversion_with_gap()
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect()
-            } else {
-                get_standard_conversion()
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect()
-            }
-        }
-    };
-    let mut result = String::from(seq);
-    for (key, value) in converter.iter() {
-        result = result.replace(key, value);
-    }
-    result
+/// Converts a sequence according to either the default conversions or a custom correction dictionary.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn convert_to_valid(
+    seq: &str,
+    alignment: bool,
+    correction_dictionary: Option<CorrectionDictionary>,
+) -> String {
+    conversion_strategy(correction_dictionary, alignment).apply(seq)
 }
 
+/// Validates a protein sequence and returns the first invalid residue when present.
 pub fn check_sequence_is_valid(seq: &str, alignment: bool) -> (bool, char) {
-    let standard_aas = get_standard_aas();
-    let standard_aas_with_gap = get_standard_aas_with_gap();
-    let valid_aa_list = if alignment {
-        &standard_aas_with_gap
-    } else {
-        &standard_aas
-    };
-    let seq_chars: HashSet<char> = seq.chars().collect();
-    for &c in &seq_chars {
-        if !valid_aa_list.contains(&c) {
-            return (false, c);
+    for residue in seq.chars() {
+        let residue = residue.to_ascii_uppercase();
+        if !is_valid_residue(residue, alignment) {
+            return (false, residue);
         }
     }
     (true, '0')
 }
 
+/// Converts invalid sequences in place and returns the number of changed records.
 pub fn convert_invalid_sequences(
-    mut dataset: Vec<Vec<String>>,
-    correction_dictionary: Option<HashMap<String, String>>,
+    mut dataset: Vec<FastaRecord>,
+    correction_dictionary: Option<CorrectionDictionary>,
     alignment: bool,
-) -> (Vec<Vec<String>>, usize) {
-    let mut count = 0;
-    for row in &mut dataset {
-        let s = row[1].clone();
-        let corrected = convert_to_valid(&s, alignment, correction_dictionary.clone());
-        row[1] = corrected.clone();
-        if s != corrected {
-            count += 1;
+) -> (Vec<FastaRecord>, usize) {
+    let strategy = conversion_strategy(correction_dictionary, alignment);
+    let mut converted_count = 0;
+
+    for record in &mut dataset {
+        let updated = strategy.apply(&record.sequence);
+        if updated != record.sequence {
+            converted_count += 1;
+            record.sequence = updated;
         }
     }
-    (dataset, count)
+
+    (dataset, converted_count)
 }
 
-pub fn remove_invalid_sequences(
-    dataset: Vec<Vec<String>>,
-    alignment: bool,
-) -> Vec<Vec<String>> {
+/// Removes records that contain invalid residues.
+pub fn remove_invalid_sequences(dataset: Vec<FastaRecord>, alignment: bool) -> Vec<FastaRecord> {
     dataset
         .into_iter()
-        .filter(|element| {
-            let (is_valid, _) = check_sequence_is_valid(&element[1], alignment);
-            is_valid
-        })
+        .filter(|record| check_sequence_is_valid(&record.sequence, alignment).0)
         .collect()
 }
 
-pub fn fail_on_invalid_sequences(sequences: Vec<Vec<String>>, alignment: bool) -> Result<(), String> {
-    for sequence in &sequences {
-        let (is_valid, invalid_char) = check_sequence_is_valid(&sequence[1], alignment);
+/// Fails on the first record that contains an invalid residue.
+pub fn fail_on_invalid_sequences(
+    sequences: &[FastaRecord],
+    alignment: bool,
+) -> Result<(), RfastaError> {
+    for record in sequences {
+        let (is_valid, invalid_char) = check_sequence_is_valid(&record.sequence, alignment);
         if !is_valid {
-            return Err(format!(
-                "Invalid character '{}' found in sequence: {}",
-                invalid_char, sequence[0]
-            ));
+            return Err(RfastaError::InvalidSequence {
+                header: record.header.clone(),
+                invalid_char,
+                alignment,
+                hint: "Use InvalidSequenceAction::Convert, InvalidSequenceAction::ConvertRemove, or InvalidSequenceAction::Remove if you want rfasta to sanitize invalid residues.",
+            });
         }
     }
     Ok(())
 }
 
-pub fn convert_list_to_dictionary(raw_list: Vec<Vec<String>>, verbose: bool) -> HashMap<String, String> {
+/// Converts a list of records into a dictionary keyed by header.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn convert_records_to_dictionary(
+    records: &[FastaRecord],
+    verbose: bool,
+) -> HashMap<String, String> {
     let mut return_dict = HashMap::new();
-    if verbose {
-        let mut warning_count = 0;
-        for entry in &raw_list {
-            if let Some(_) = return_dict.insert(entry[0].clone(), entry[1].clone()) {
-                warning_count += 1;
-                println!("[WARNING]: Overwriting entry [count = {}]", warning_count);
+    let mut warning_count = 0;
+
+    for record in records {
+        if return_dict
+            .insert(record.header.clone(), record.sequence.clone())
+            .is_some()
+        {
+            warning_count += 1;
+            if verbose {
+                println!("[WARNING]: Overwriting entry [count = {warning_count}]");
             }
         }
+    }
+
+    if verbose {
         if warning_count > 0 {
-            println!("[INFO] If you want to avoid overwriting duplicate headers set return_list=True");
+            println!("[INFO]: If you want to avoid overwriting duplicate headers, request list-style output.");
         } else {
             println!("[INFO]: All processed sequences uniquely added to the returning dictionary");
         }
-    } else {
-        for entry in &raw_list {
-            return_dict.insert(entry[0].clone(), entry[1].clone());
-        }
     }
+
     return_dict
 }
 
-pub fn fail_on_duplicates(dataset: Vec<(String, String)>) -> Result<(), String> {
-    let mut lookup = HashMap::new();
-    for entry in dataset {
-        if let Some(existing_value) = lookup.get(&entry.0) {
-            if existing_value == &entry.1 {
-                return Err(format!(
-                    "Found duplicate entries of the following record:\n>{}\n{}",
-                    entry.0, entry.1
-                ));
-            }
-        } else {
-            lookup.insert(entry.0, entry.1);
+/// Fails when an exact duplicate record appears more than once.
+pub fn fail_on_duplicates(dataset: &[FastaRecord]) -> Result<(), RfastaError> {
+    let mut seen: HashSet<(String, String)> = HashSet::with_capacity(dataset.len());
+    for record in dataset {
+        let key = (record.header.clone(), record.sequence.clone());
+        if !seen.insert(key) {
+            return Err(RfastaError::DuplicateRecord {
+                header: record.header.clone(),
+                hint: "Use DuplicateAction::Remove to keep the first occurrence, or enable unique headers during parsing if duplicates are unexpected.",
+            });
         }
     }
     Ok(())
 }
 
-pub fn remove_duplicates(dataset: Vec<(String, String)>) -> Vec<(String, String)> {
-    let mut lookup: HashMap<String, Vec<String>> = HashMap::new();
-    let mut updated: Vec<(String, String)> = Vec::new();
-    for entry in dataset {
-        if !lookup.contains_key(&entry.0) {
-            lookup.insert(entry.0.clone(), vec![entry.1.clone()]);
-            updated.push(entry);
-        } else {
-            let mut found_dupe = false;
-            for d in &lookup[&entry.0] {
-                if d == &entry.1 {
-                    found_dupe = true;
-                    break;
-                }
-            }
-            if !found_dupe {
-                lookup.get_mut(&entry.0).unwrap().push(entry.1.clone());
-                updated.push(entry);
-            }
+/// Removes duplicate records while keeping the first occurrence.
+pub fn remove_duplicates(dataset: Vec<FastaRecord>) -> Vec<FastaRecord> {
+    let mut seen: HashSet<(String, String)> = HashSet::with_capacity(dataset.len());
+    let mut updated = Vec::with_capacity(dataset.len());
+
+    for record in dataset {
+        let key = (record.header.clone(), record.sequence.clone());
+        if seen.insert(key) {
+            updated.push(record);
         }
     }
+
     updated
 }
 
-/// Fails if duplicate headers are found.
-pub fn fail_on_duplicate_records(dataset: Vec<Vec<String>>) -> Result<(), String> {
-    let mut headers = std::collections::HashSet::new();
-    for entry in dataset {
-        if !headers.insert(entry[0].clone()) {
-            return Err(format!("Duplicate header found: {}", entry[0]));
+/// Fails when the same sequence appears for multiple headers.
+pub fn fail_on_duplicate_sequences(dataset: &[FastaRecord]) -> Result<(), RfastaError> {
+    let mut sequences = HashMap::with_capacity(dataset.len());
+    for record in dataset {
+        if let Some(first_header) = sequences.insert(record.sequence.clone(), record.header.clone())
+        {
+            return Err(RfastaError::DuplicateSequence {
+                first_header,
+                duplicate_header: record.header.clone(),
+                hint: "Use DuplicateAction::Remove to keep the first sequence occurrence, or DuplicateAction::Ignore to preserve all matching sequences.",
+            });
         }
     }
     Ok(())
 }
 
-/// Removes entries with duplicate headers.
-pub fn remove_duplicate_records(dataset: Vec<Vec<String>>) -> Vec<Vec<String>> {
-    let mut seen = std::collections::HashSet::new();
-    dataset
-        .into_iter()
-        .filter(|entry| seen.insert(entry[0].clone()))
-        .collect()
-}
+/// Removes duplicate sequences while keeping the first occurrence.
+pub fn remove_duplicate_sequences(dataset: Vec<FastaRecord>) -> Vec<FastaRecord> {
+    let mut seen = HashSet::with_capacity(dataset.len());
+    let mut updated = Vec::with_capacity(dataset.len());
 
-/// Fails if duplicate sequences are found.
-pub fn fail_on_duplicate_sequences(dataset: Vec<Vec<String>>) -> Result<(), String> {
-    let mut sequences = std::collections::HashSet::new();
-    for entry in dataset {
-        if !sequences.insert(entry[1].clone()) {
-            return Err(format!("Duplicate sequence found for header: {}", entry[0]));
+    for record in dataset {
+        if seen.insert(record.sequence.clone()) {
+            updated.push(record);
         }
     }
-    Ok(())
-}
 
-/// Removes entries with duplicate sequences.
-pub fn remove_duplicate_sequences(dataset: Vec<Vec<String>>) -> Vec<Vec<String>> {
-    let mut seen = std::collections::HashSet::new();
-    dataset
-        .into_iter()
-        .filter(|entry| seen.insert(entry[1].clone()))
-        .collect()
+    updated
 }

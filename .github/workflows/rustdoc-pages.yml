@@ -1,0 +1,41 @@
+name: Rustdoc Pages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rustdoc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build rustdoc
+        run: cargo doc --no-deps
+      - name: Prepare Pages payload
+        shell: bash
+        run: |
+          mkdir -p site
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            mkdir -p "site/api/${GITHUB_REF_NAME}"
+            cp -R target/doc/* "site/api/${GITHUB_REF_NAME}/"
+          else
+            mkdir -p site/api/latest
+            cp -R target/doc/* site/api/latest/
+          fi
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./site
+          keep_files: true

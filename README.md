@@ -1,49 +1,110 @@
-# rfasta: Rust-powered protein FASTA parser library and CLI.
+# rfasta
 
-**rfasta** is designed for bioinformaticians and protein scientists who need a fast,
-reliable tool for parsing, cleaning, and manipulating protein sequence FASTA files.
+`rfasta` is a production-ready toolkit for parsing, cleaning, writing, and sharding protein FASTA
+files.
 
-rfasta is a direct port of the python package [protfasta](https://github.com/holehouse-lab/protfasta) into rust. This greatly improves the performance of parsing, cleaning, and manipulation of LARGE protein sequence fasta files such as those from uniref.
+It provides:
 
-## Example Usage
+- A high-performance Rust library
+- A Python package for scripting and notebooks
+- A CLI for batch and pipeline workflows
 
-### **Sanitize fasta file - removes duplicate sequences, invalid sequences [in this case all sequences with noncanonical amino acids]**
+## Highlights
+
+- FASTA parsing from files or in-memory readers
+- Configurable cleanup policies for duplicate records and invalid residues
+- Deterministic shard generation for parallel processing
+- Python bindings via PyO3
+- CLI designed for operational workflows
+- Documentation for Rust, Python, and CLI usage
+
+## Installation
+
+### Python (recommended for end users)
+
 ```bash
-rfasta clean --non-unique-header --duplicate-record remove --invalid-sequence remove  test.fasta -o output.fasta
-```
-#### Output
-```markdown
-[INFO]: Read in file with 100005 lines
-[INFO]: Parsed file to recover 11085 sequences
-[INFO]: Removed 68 of 11085 sequences due to invalid characters
-[INFO]: Removed 1 of 11017 sequences due to duplicate records
-[INFO]: Wrote 11016 sequences to output.fasta
+pip install rfasta
 ```
 
+### Rust (library development)
 
-### **Shard fasta file into smaller chunkers**
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+rfasta = "0.1"
+```
+
+## Quick Start
+
+### CLI
+
+Clean a FASTA file:
+
 ```bash
-rfasta split --output-dir . --chunks 3 output.fasta
-```
-#### Output
-```markdown
-[INFO]: Read in file with 110670 lines
-[INFO]: Parsed file to recover 11016 sequences
-[INFO]: Wrote 3672 sequences to ./output_000001.fasta
-[INFO]: Wrote 3672 sequences to ./output_000002.fasta
-[INFO]: Wrote 3672 sequences to ./output_000003.fasta
-[INFO]: Split FASTA into 3 chunks
+rfasta clean proteins.fasta \
+  --non-unique-header \
+  --duplicate-record remove \
+  --invalid-sequence convert-remove \
+  -o cleaned.fasta
 ```
 
-## Changelog
+Split a large FASTA file into one-pass round-robin shards:
 
-# v0.1.0-beta (Initial Release)
-# Initial beta release of rfasta.
-- Core functionality for:
-  - Parsing: Read and interpret protein FASTA files efficiently.
-  - Cleaning: Remove invalid entries and ensure sequences conform to biological standards.
-  - Manipulation: Efficient fasta sharding operations on large protein sequence fasta files.
-- Rust CLI integration for command-line use cases.
-- Python bindings via PyO3 for seamless Python library integration.
-- High performance with optimized parsing for large-scale FASTA files (e.g., UniRef datasets).
-- Early-stage development—additional features, documentation, and pypi deployment to follow in subsequent releases.
+```bash
+rfasta split proteins.fasta --output-dir shards --chunks 8
+```
+
+### Python
+
+```python
+import rfasta
+
+rows = rfasta.read_fasta("proteins.fasta", expect_unique_header=True, verbose=False)
+rfasta.write_fasta(rows, "proteins.copy.fasta", line_length=60)
+```
+
+### Rust
+
+```rust
+use std::io::Cursor;
+
+use rfasta::clean::{clean_sequences, CleanOptions, DuplicateAction, InvalidSequenceAction};
+use rfasta::parse::{parse_fasta_reader, ParseOptions};
+use rfasta::write::{write_fasta_writer, WriteOptions};
+
+let input = b">seq1\nacdx\n>seq2\nTTTT\n";
+let records = parse_fasta_reader(Cursor::new(input), ParseOptions::default())?;
+let cleaned = clean_sequences(
+    records,
+    &CleanOptions {
+        invalid_sequence_action: InvalidSequenceAction::ConvertRemove,
+        duplicate_record_action: DuplicateAction::Fail,
+        ..CleanOptions::default()
+    },
+)?;
+let mut output = Vec::new();
+write_fasta_writer(&mut output, &cleaned, &WriteOptions::default())?;
+# Ok::<(), rfasta::RfastaError>(())
+```
+
+## Documentation and Guides
+
+- User guides: [`docs/`](./docs)
+- API reference entry point: [`docs/api-reference.md`](./docs/api-reference.md)
+- Release and PyPI publishing runbook: [`RELEASING.md`](./RELEASING.md)
+
+Build the guide site locally:
+
+```bash
+pip install -r docs/requirements.txt
+mkdocs build --strict
+```
+
+## Local Performance Check
+
+For a repo-local benchmark driver that does not require extra benchmark crates, run:
+
+```bash
+cargo run --release --example benchmark_driver
+```

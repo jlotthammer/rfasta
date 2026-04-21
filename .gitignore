@@ -11,6 +11,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 .venv/
+.venv-smoke/
 env/
 bin/
 build/
@@ -61,6 +62,7 @@ coverage.xml
 
 # Sphinx documentation
 docs/_build/
+site/
 
 # PyCharm
 .idea/
@@ -70,3 +72,5 @@ docs/_build/
 
 # Pyenv
 .python-version
+
+RELEASING.md

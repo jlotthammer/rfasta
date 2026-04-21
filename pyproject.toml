@@ -4,6 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "rfasta"
+description = "Rust-native toolkit for parsing, cleaning, writing, and sharding protein FASTA files."
+readme = "README.md"
 requires-python = ">=3.7"
 classifiers = [
     "Programming Language :: Rust",
@@ -16,8 +18,6 @@ dynamic = ["version"]
 rfasta = "rfasta:cli_main"
 
 [tool.maturin]
-features = ["python", "cli"]  # Enable both features
+features = ["python-module", "cli"]
 module-name = "rfasta"
 bindings = "pyo3"
-# This tells maturin to include the binary
-bin = ["rfasta"]

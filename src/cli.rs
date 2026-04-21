@@ -1,13 +1,23 @@
-use clap::{Parser, Subcommand};
-use crate::{io, sequence_processing};
 use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+
+use crate::configs::DEFAULT_LINE_LENGTH;
+use crate::errors::RfastaError;
+use crate::io::{
+    parse_fasta_file, split_fasta_file_round_robin, write_fasta_file, ParseOptions, WriteOptions,
+};
+use crate::sequence_processing::{
+    clean_sequences, CleanOptions, DuplicateAction, InvalidSequenceAction,
+};
 
 #[derive(Parser)]
 #[command(
     author = "jlotthammer",
     version,
-    about = "rfasta is a simple command-line tool for parsing, sanitizing, and manipulating protein-based FASTA files. This project is a port of the python protfasta package to rust+py03 bindings.",
-    long_about = None
+    about = "rfasta parses, cleans, writes, and shards protein FASTA files.",
+    long_about = "rfasta is a production-ready FASTA toolkit for protein datasets. Use `clean` to standardize and validate records, and `split` to create shard files for parallel downstream processing.",
+    after_help = "Examples:\n  rfasta clean proteins.fasta -o cleaned.fasta --duplicate-record remove --invalid-sequence convert-remove\n  rfasta split proteins.fasta --output-dir shards --chunks 8"
 )]
 struct Args {
     #[command(subcommand)]
@@ -16,104 +26,95 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Clean a FASTA file [feature parity with protfasta]
+    /// Parse and clean a FASTA file.
     Clean {
-        /// Input FASTA file
+        /// Input FASTA file.
         filename: PathBuf,
 
-        /// Output fasta file (is created)
+        /// Output FASTA file.
         #[arg(short = 'o')]
         output: Option<PathBuf>,
 
-        /// Allow non-unique headers
+        /// Allow repeated FASTA headers during parsing.
         #[arg(long)]
         non_unique_header: bool,
 
-        /// How to deal with duplicate records
-        #[arg(long, default_value = "fail")]
-        duplicate_record: String,
+        /// How to deal with exact duplicate FASTA records.
+        #[arg(long, value_enum, default_value_t = DuplicateAction::Fail)]
+        duplicate_record: DuplicateAction,
 
-        /// How to deal with duplicate sequences
-        #[arg(long, default_value = "ignore")]
-        duplicate_sequence: String,
+        /// How to deal with duplicate sequences across headers.
+        #[arg(long, value_enum, default_value_t = DuplicateAction::Ignore)]
+        duplicate_sequence: DuplicateAction,
 
-        /// How to deal with invalid sequences
-        #[arg(long, default_value = "fail")]
-        invalid_sequence: String,
+        /// How to deal with invalid sequences.
+        #[arg(long, value_enum, default_value_t = InvalidSequenceAction::Fail)]
+        invalid_sequence: InvalidSequenceAction,
 
-        /// Number of lines for FASTA file
+        /// Number of residues per line in the output FASTA.
         #[arg(long)]
         number_lines: Option<usize>,
 
-        /// Shortest sequence included
+        /// Shortest sequence to keep.
         #[arg(long)]
         shortest_seq: Option<usize>,
 
-        /// Longest sequence included
+        /// Longest sequence to keep.
         #[arg(long)]
         longest_seq: Option<usize>,
 
-        /// Randomly sub-sample from sequences
+        /// Randomly subsample this many sequences after filtering.
         #[arg(long)]
         random_subsample: Option<usize>,
 
-        /// Print information on the sequences
+        /// Print summary statistics for the cleaned output.
         #[arg(long)]
         print_statistics: bool,
 
-        /// Prevents rfasta from writing an output file
+        /// Skip writing the cleaned output file.
         #[arg(long)]
         no_outputfile: bool,
 
-        /// Generate no output at all to STDOUT
+        /// Suppress informational output.
         #[arg(long)]
         silent: bool,
 
-        /// Replace commas in FASTA headers with semicolons
+        /// Replace commas in FASTA headers with semicolons.
         #[arg(long)]
         remove_comma_from_header: bool,
     },
-    /// Split a FASTA file into N approximately equal chunks
+    /// Split a FASTA file into shard files.
     Split {
-        /// Input FASTA file
+        /// Input FASTA file.
         filename: PathBuf,
 
-        /// Output directory (is created if it doesn't exist)
+        /// Output directory. Files are created on demand.
         #[arg(short = 'o', long)]
         output_dir: PathBuf,
 
-        /// Number of chunks to split into
+        /// Number of requested shard buckets.
         #[arg(short, long)]
         chunks: usize,
 
-        /// Prevents rfasta from writing output files
+        /// Line length to use in shard output.
+        #[arg(long, default_value_t = DEFAULT_LINE_LENGTH)]
+        line_length: usize,
+
+        /// Skip writing output files.
         #[arg(long)]
         no_outputfiles: bool,
 
-        /// Generate no output at all to STDOUT
+        /// Suppress informational output.
         #[arg(long)]
         silent: bool,
     },
 }
 
-// Removed helper function definitions from cli.rs
-
-/// The main entry point for the rfasta command-line interface.
-///
-/// Parses command-line arguments and executes the appropriate subcommands.
-///
-/// # Arguments
-///
-/// * `args` - A slice of command-line argument strings.
-///
-/// # Returns
-///
-/// * `Ok(())` if the command executes successfully.
-/// * `Err(String)` with an error message if execution fails.
-pub fn main(args: &[String]) -> Result<(), String> {
+/// Runs the rfasta command-line interface.
+pub fn main(args: &[String]) -> Result<(), RfastaError> {
     let args = Args::parse_from(args);
 
-    match &args.command {
+    match args.command {
         Commands::Clean {
             filename,
             output,
@@ -121,7 +122,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
             duplicate_record,
             duplicate_sequence,
             invalid_sequence,
-            number_lines: _,
+            number_lines,
             shortest_seq,
             longest_seq,
             random_subsample,
@@ -130,87 +131,80 @@ pub fn main(args: &[String]) -> Result<(), String> {
             silent,
             remove_comma_from_header,
         } => {
-            // Parse the FASTA file
-            let data = io::internal_parse_fasta_file(
-                filename.to_str().unwrap_or_default(),
-                !*non_unique_header,
-                None,
-                !*silent,
+            if !non_unique_header && matches!(duplicate_record, DuplicateAction::Ignore) {
+                return Err(RfastaError::invalid_input(
+                    "clean",
+                    "cannot combine unique-header parsing with duplicate-record ignore mode",
+                    "Pass --non-unique-header if repeated headers are expected, or use --duplicate-record fail/remove.",
+                ));
+            }
+
+            let records = parse_fasta_file(
+                filename,
+                ParseOptions {
+                    expect_unique_header: !non_unique_header,
+                },
+                !silent,
             )?;
 
-            // Clean the sequences using the functions from sequence_processing.rs
-            let cleaned_data = sequence_processing::clean_sequences(
-                data,
-                invalid_sequence,
-                duplicate_record,
-                duplicate_sequence,
-                shortest_seq,
-                longest_seq,
-                random_subsample,
-                *remove_comma_from_header,
-                false,
-                !*silent,
+            let cleaned = clean_sequences(
+                records,
+                &CleanOptions {
+                    invalid_sequence_action: invalid_sequence,
+                    duplicate_record_action: duplicate_record,
+                    duplicate_sequence_action: duplicate_sequence,
+                    shortest_seq,
+                    longest_seq,
+                    random_subsample,
+                    remove_comma_from_header,
+                    alignment: false,
+                    verbose: !silent,
+                    correction_dictionary: None,
+                },
             )?;
 
-            // Print statistics if requested
-            if *print_statistics && !*silent {
-                println!("Total sequences: {}", cleaned_data.len());
-                if let Some(seq) = cleaned_data.iter().map(|s| s[1].len()).min() {
-                    println!("Shortest sequence: {}", seq);
+            if print_statistics && !silent {
+                println!("Total sequences: {}", cleaned.len());
+                if let Some(shortest) = cleaned.iter().map(|record| record.sequence.len()).min() {
+                    println!("Shortest sequence: {shortest}");
                 }
-                if let Some(seq) = cleaned_data.iter().map(|s| s[1].len()).max() {
-                    println!("Longest sequence: {}", seq);
+                if let Some(longest) = cleaned.iter().map(|record| record.sequence.len()).max() {
+                    println!("Longest sequence: {longest}");
                 }
             }
 
-            // Write output file if requested
-            if !*no_outputfile {
-                if let Some(output_path) = output {
-                    io::write_fasta(
-                        cleaned_data,
-                        output_path.to_str().unwrap_or_default(),
-                        Some(60), // Default line length
-                        !*silent,
-                        false, // Don't append by default
+            if !no_outputfile {
+                if let Some(output) = output {
+                    write_fasta_file(
+                        &cleaned,
+                        output,
+                        WriteOptions {
+                            line_length: number_lines.or(Some(DEFAULT_LINE_LENGTH)),
+                            append: false,
+                        },
+                        !silent,
                     )?;
                 }
             }
-        },
+        }
         Commands::Split {
             filename,
             output_dir,
             chunks,
+            line_length,
             no_outputfiles,
             silent,
         } => {
-            let fasta_data = io::internal_parse_fasta_file(
-                filename.to_str().unwrap_or_default(),
-                true,
-                None,
-                !silent,
-            )?;
-
-            let split_data = io::split_fasta(fasta_data, *chunks);
-
-            if !*no_outputfiles {
-                std::fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
-                for (i, chunk) in split_data.iter().enumerate() {
-                    let filename_stem = filename.file_stem().unwrap_or_default().to_str().unwrap_or_default();
-                    let chunk_filename = output_dir.join(format!("{}_{}.fasta", filename_stem, format!("{:06}", i + 1)));
-                    io::write_fasta(
-                        chunk.clone(),
-                        chunk_filename.to_str().unwrap_or_default(),
-                        Some(60),
-                        !silent,
-                        false,
-                    )?;
-                }
+            if !no_outputfiles {
+                split_fasta_file_round_robin(
+                    filename,
+                    output_dir,
+                    chunks,
+                    Some(line_length),
+                    !silent,
+                )?;
             }
-
-            if !silent {
-                println!("[INFO]: Split FASTA into {} chunks", split_data.len());
-            }
-        },
+        }
     }
 
     Ok(())

@@ -6,7 +6,8 @@ edition = "2021"
 [features]
 default = ["cli"]
 cli = []
-python = ["pyo3/extension-module"]
+python = ["pyo3/auto-initialize"]
+python-module = ["python", "pyo3/extension-module"]
 
 [lib]
 name = "rfasta"

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["write_fasta_file","write_fasta_writer"],"struct":["WriteOptions"]};

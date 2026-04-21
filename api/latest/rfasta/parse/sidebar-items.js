@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_fasta_file","parse_fasta_reader","visit_fasta_file","visit_fasta_reader"],"struct":["FastaRecord","ParseOptions"]};
